@@ -452,8 +452,52 @@ Tensor& tensordot_out(
   return result;
 }
 
+Tensor _weight_int4pack_mm_xpu(
+    const Tensor& A,
+    const Tensor& B,
+    int64_t qGroupSize,
+    const Tensor& qScaleAndZeros) {
+
+  constexpr int64_t kNTileSize = 8;
+
+  auto M = A.size(0); // M
+  auto N = B.size(0) * kNTileSize;  // N1=LCM(N, K)
+  auto K = A.size(1); // K1=LCM(K, 1024)
+  TORCH_CHECK(A.dtype() == kBFloat16 || A.dtype() == kHalf || A.dtype() == kFloat,
+      __func__, " : expect A to be either 32-bit or 16-bit float tensor.");
+  TORCH_CHECK(A.is_contiguous(),
+      __func__, " : expect A to be contiguous.");
+  TORCH_CHECK(A.dim() == 2,
+      __func__, " : expect A to be 2D tensor.");
+
+  TORCH_CHECK(B.dtype() == kInt,
+      __func__, " : expect B to be int32 tensor.");
+  TORCH_CHECK(B.dim() == 4,
+      __func__, " : expect B to 4d tensor.");
+
+  TORCH_CHECK(qGroupSize == 32 || qGroupSize == 64 || qGroupSize == 128
+      || qGroupSize == 256,
+      __func__, ": expect qGroupSize to be 32, 64, 128 or 256, got ", qGroupSize);
+
+  TORCH_CHECK(qScaleAndZeros.dim() == 3 && qScaleAndZeros.size(1) == N
+      && qScaleAndZeros.size(2) == 2,
+      __func__, ": expect qScaleAndZeros to be 3d tensor with sizes [:, ", N, ", 2]");
+  
+  auto C = at::empty({M, N}, A.options());
+  
+  //qScaleAndZeros [K/qGroupSize, N, 2]
+  //qscale:[K/qGroupSize, N]
+  //qzp:[K/qGroupSize, N]
+  auto qscale = qScaleAndZeros.select(2, 0).contiguous();
+  auto qzp = qScaleAndZeros.select(2, 1).contiguous().to(kChar);
+  woq_matmul_int4(C, A, B, qscale, qzp, qGroupSize, onednn::Attr());
+
+  return C;
+}
+
 TORCH_LIBRARY_IMPL(aten, XPU, m) {
   m.impl("tensordot.out", TORCH_FN(tensordot_out));
+  m.impl("_weight_int4pack_mm", TORCH_FN(_weight_int4pack_mm_xpu));
 }
 } // namespace xpu
 
